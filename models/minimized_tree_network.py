@@ -1,0 +1,121 @@
+import torch
+import torch.nn as nn
+
+
+class TreeNode(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, x):
+        return self.net(x).squeeze(1)
+
+
+class MinimizedTreeNetwork(nn.Module):
+    def __init__(
+        self,
+        num_classes=10,
+        channels=(32, 64, 64),
+        feature_dim=128,
+        node_hidden=64
+    ):
+        super().__init__()
+
+        self.num_classes = num_classes
+
+        c1, c2, c3 = channels
+
+        self.features = nn.Sequential(
+            nn.Conv2d(3, c1, 3, padding=1),
+            nn.BatchNorm2d(c1),
+            nn.ReLU(),
+
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(c1, c2, 3, padding=1),
+            nn.BatchNorm2d(c2),
+            nn.ReLU(),
+
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(c2, c3, 3, padding=1),
+            nn.BatchNorm2d(c3),
+            nn.ReLU(),
+
+            nn.AdaptiveAvgPool2d((4, 4))
+        )
+
+        self.projection = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(c3 * 4 * 4, feature_dim),
+            nn.ReLU()
+        )
+
+        self.paths = [
+            [0, 0, 0],
+            [0, 0, 1],
+            [0, 1, 0],
+            [0, 1, 1],
+            [1, 0, 0],
+            [1, 0, 1],
+            [1, 1, 0, 0],
+            [1, 1, 0, 1],
+            [1, 1, 1, 0],
+            [1, 1, 1, 1]
+        ]
+
+        self.nodes = nn.ModuleList([
+            TreeNode(feature_dim, node_hidden)
+            for _ in range(9)
+        ])
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.projection(x)
+
+        node_outputs = torch.stack(
+            [node(x) for node in self.nodes],
+            dim=1
+        )
+
+        batch_size = x.size(0)
+        class_scores = []
+
+        node_map = {
+            (): 0,
+            (0,): 1,
+            (1,): 2,
+            (0, 0): 3,
+            (0, 1): 4,
+            (1, 0): 5,
+            (1, 1): 6,
+            (1, 1, 0): 7,
+            (1, 1, 1): 8
+        }
+
+        for path in self.paths:
+            score = torch.zeros(
+                batch_size,
+                device=x.device
+            )
+
+            prefix = ()
+
+            for bit in path:
+                node_idx = node_map[prefix]
+
+                if bit == 0:
+                    score = score - node_outputs[:, node_idx]
+                else:
+                    score = score + node_outputs[:, node_idx]
+
+                prefix = prefix + (bit,)
+
+            class_scores.append(score)
+
+        return torch.stack(class_scores, dim=1)
